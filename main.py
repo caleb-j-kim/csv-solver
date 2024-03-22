@@ -38,38 +38,56 @@ def get_tracking(): #update function after adding fc and bc
                 return False
 
 
-def check_consistency(value1, value2, constraint):
-    op = constraint[1]
-    if op == "=":
-        return value1 == value2
-    elif op == "!":
-        return value1 != value2
-    elif op == ">":
-        return value1 > value2
-    elif op == "<":
-        return value1 < value2
-    else:
-        raise ValueError(f"Unsupported constraint operator: {op}")
+def check_consistency(value1, value2, constraint, assignment):
+    op = constraint[0]
+    isValid = True
+    for constraint in constraints:
+        if op == "=" and value1 != value2:
+            isValid = False
+        elif op == "!" and value1 == value2:
+            isValid = False
+        elif op == ">" and value1 <= value2:
+            isValid = False
+        elif op == "<" and value1 >= value2:
+            isValid = False
+        if not isValid:
+            print("Failure")
+            print(assignment)
+    return isValid
 
 
 def validate(v, value, assignment, constraints): #v = variable(s), validates if values fit constraints
     for constraint in constraints:
         v1, op, v2 = constraint
         if v1 == v and v2 in assignment:
-            if not check_consistency(value, assignment[v2], op):
+            if not check_consistency(value, assignment[v2], op, assignment):
                 return False
         elif v2 == v and v1 in assignment:
-            if not check_consistency(assignment[v1], value, op):
+            if not check_consistency(assignment[v1], value, op, assignment):
                 return False
     return True
 
 
-def mrv(variables, constraints): #minimum remaining value function, for solver to choose a variable
-    degrees = {v: 0 for v in variables.keys()} #finds degree / total amount of constraints of each variable
+def count_constraining_effect(value, v, domains, constraints):
+    count = 0
     for constraint in constraints:
-        for v in constraints[:2]:
-            if v in degrees:
-                degrees[v] += 1
+        if v in constraint:
+            other_var = constraint[0] if constraint[2] == v else constraint[2]
+            if other_var != v:
+                # Safely access domain of other_var
+                other_domain = domains.get(other_var, [])
+                for other_value in other_domain:
+                    if not validate(v, value, {v: value, other_var: other_value}, constraints):
+                        count += 1
+    return count
+
+
+def mrv(variables, domains): #minimum remaining value function, for solver to choose a variable
+    unassigned_variables = {var: len(domains[var]) for var in domains}
+    if unassigned_variables:
+        return sorted(unassigned_variables, key=lambda x: (unassigned_variables[x], x))[0] 
+    else:
+        None
 
     sorted_v = sorted(variables.keys(), key = lambda vars: (len(variables[vars]), -degrees[vars], vars)) #sorts variables by mrv, degree, then alphabetically
     if sorted_v:
@@ -78,22 +96,12 @@ def mrv(variables, constraints): #minimum remaining value function, for solver t
         return None
 
 
-def lcv(v, variables, constraints): #least constraining value heuristic function, for solver to choose a value
-    constraining_values = {}
-    for value in variables[v]:
-        constraining_values[value] = 0
-        for constraint in constraints:
-            if v in constraint:
-                if v == constraint[2]:
-                    v2 = constraint[0]
-                else:
-                    v2 = constraint[2]
-                if v2 != v:
-                    for value2 in variables[v2]:
-                        if not check_consistency(value, value2, constraint): #determine if there are any constraining values inside of v and v2
-                            constraining_values[value] += 1
-    ordered_values = sorted(constraining_values, key = lambda vars: (constraining_values[vars], vars))
-    return ordered_values
+def lcv(v, domains, constraints, assignment): #least constraining value heuristic function, for solver to choose a value
+    if v not in domains:
+        return []
+
+    values_sorted_by_lcv = sorted(domains[v], key=lambda x: count_constraining_effect(x, v, domains, constraints))
+    return values_sorted_by_lcv
 
 
 def forward_check(var, value, assignment, domains, constraints):
@@ -105,7 +113,7 @@ def forward_check(var, value, assignment, domains, constraints):
             if other_var not in assignment:  # Skip if already assigned
                 new_domain = []
                 for other_value in new_domains[other_var]:
-                    if check_consistency(value, other_value, op):
+                    if check_consistency(value, other_value, constraints, assignment):
                         new_domain.append(other_value)
                 if not new_domain:  # No valid values left for other_var
                     return None  # Indicate failure
@@ -113,33 +121,45 @@ def forward_check(var, value, assignment, domains, constraints):
     return new_domains
 
 
-def backtrack(assignment, variables, domains, constraints, use_forward_checking, path=[], attempt=1):
+def backtrack(assignment, variables, domains, constraints, tracking, path=[], attempt=1):
     if len(assignment) == len(variables):
-        print(f"{attempt}. ", ", ".join(path), "solution")
-        return assignment  #Solution is found and returned
+        # Print solution
+        print_solution(path, True)
+        return True
 
-    var = mrv(variables, constraints)
-    for value in lcv(var, variables, constraints):
-        path_copy = path + [f"{var}={value}"]
-        if validate(var, value, assignment, constraints):
-            new_assignment = assignment.copy()
-            new_assignment[var] = value
-            if use_forward_checking:
-                new_domains = forward_check(var, value, new_assignment, domains, constraints)
-                if new_domains is None:  #Forward checking indicated a failure
-                    print(f"{attempt}. ", ", ".join(path_copy), "failure")
-                    continue
+    v = mrv(variables, domains)
+    for value in lcv(v, domains, constraints, assignment):
+        if check_consistency(v, value, constraints, assignment):
+            assignment[v] = value
+            new_path = path[:] + [f"{v}={value}"]
+            new_domains = domains.copy()
+            if v in new_domains: del new_domains[v]  # Remove assigned var from domains
+
+            if tracking and not forward_check(v, value, assignment, new_domains, constraints):
+                # Forward checking failed, try next value
+                print_solution(new_path, False)
+                attempt += 1
+                continue
+            
+            if backtrack(assignment.copy(), variables, new_domains, constraints, tracking, new_path, attempt):
+                return True  # Successful completion
             else:
-                new_domains = domains
+                # Backtracking, this path failed
+                print_solution(new_path, False)
+                attempt += 1
+    
+    return False  # Failed to find a solution
 
-            result = backtrack(new_assignment, variables, new_domains, constraints, use_forward_checking, path_copy, attempt + 1)
-            if result:
-                return result
 
-    if not path:  #If no solution was found
-        print("Failed to find a solution.")
-    return None
-
+def print_solution(path, found):
+    if found:
+        print("Solution found.")
+    else:
+        print("Failure.")
+    
+    for assignment in path:
+        print(assignment)
+        
 
 def solve_csp(variables, constraints, tracking):
     domains = {v: variables[v] for v in variables}
@@ -150,6 +170,6 @@ def solve_csp(variables, constraints, tracking):
 if __name__ == "__main__":
     variables = read_var_file("ex1.var1")
     constraints = read_con_file("ex1.con")
+    print(constraints)
     t = get_tracking()
     result = solve_csp(variables, constraints, t)
-    print(result)
